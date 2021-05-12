@@ -24,12 +24,11 @@ const fileList = [];
 let baseIndexServer = process.env.NODE_ID || 0;
 let nodeId = getId(addresses[baseIndexServer].port);
 let leaderId = getId(Math.max(...findLeader()));
+let learnerId = getId(Math.min(...findLeader()));
 let status = 'ok';
 let isCoordinator = true;
 let isUP = true;
 let check = 'on';
-
-let learnerId = getId(Math.min(...findLeader()));
 
 const servers = new Map();
 Object.keys(addresses).forEach((key) => {
@@ -49,7 +48,7 @@ app.set('view engine', 'pug');
 app.use(express.static(path.join(__dirname, '../public')));
 
 app.get('/', function (req, res) {
-  res.render('index', { nodeId, idLeader: leaderId });
+  res.render('index', { nodeId, idLeader: leaderId, idLearner: learnerId });
 });
 
 app.get('/files', function (req, res) {
@@ -57,10 +56,19 @@ app.get('/files', function (req, res) {
     res.render('files/index', {
       nodeId,
       idLeader: leaderId,
+      idLearner: learnerId,
       fileList
     });
   } else {
     res.status(404).type('txt').send('Not found');
+  }
+});
+
+app.get('/learner/files', function (req, res) {
+  if (nodeId == learnerId) {
+    res.status(200).send({ nodeId, fileList });
+  } else {
+    res.status(403).send({ error: 'im not a learner' });
   }
 });
 
@@ -72,6 +80,21 @@ app.post('/ping', (req, res) => {
     } is communicating...`
   );
   res.status(200).send({ serverStatus: status });
+});
+
+app.post('/ping/learner', (req, res) => {
+  handleRequest(req);
+  customLoggingMessage(
+    `${new Date().toLocaleString()} - server ${
+      req.body.nodeId
+    } it's checking learner node`
+  );
+  if (nodeId == learnerId) {
+    updateChuckMapFromNodeLogFile();
+  }
+  res
+    .status(200)
+    .send({ serverStatus: status, isLearner: nodeId == learnerId, fileList });
 });
 
 app.post('/isCoordinator', (req, res) => {
@@ -113,6 +136,17 @@ app.post('/newLeader', async (req, res) => {
   res.status(200).send('ok');
   io.emit('newLeader', leaderId);
   await leaderAvailable();
+});
+
+app.post('/newLearner', async (req, res) => {
+  handleRequest(req);
+  learnerId = req.body.idLearner;
+  if (learnerId == nodeId) {
+    // update file list with learnerDoc
+    updateChuckMapFromNodeLogFile();
+  }
+  res.status(200).send('ok');
+  io.emit('newLearner', learnerId);
 });
 
 app.post('/chunk/metadata', (req, res) => {
@@ -281,12 +315,35 @@ function handleRequest(req) {
 }
 
 async function selectLearnerNode(id = 0) {
-  //  TODO: Add learner selection
+  try {
+    let response = await axios.post(servers.get(id) + '/ping/learner', {
+      nodeId
+    });
+    if (response.data.serverStatus === 'ok') {
+      if (response.data.isLearner) {
+        learnerId = id;
+        if (response.data.fileList && response.data.fileList.length > 0) {
+          fileList = response.data.fileList;
+        }
+        return;
+      } else {
+        servers.forEach(
+          async (value) =>
+            await axios.post(value + '/newLearner', { idLearner: id })
+        );
+
+        io.emit('newLearner', id);
+        return;
+      }
+    }
+  } catch (error) {
+    if (id + 1 < leaderId) selectLearnerNode(id + 1);
+  }
 }
 
 function handleFileUpload(filePath) {
   let activeNodeList = [];
-  if (nodeId !== leaderId) {
+  if (nodeId !== leaderId && nodeId === learnerId) {
     console.error(`only leader node can upload files`);
     return;
   }
@@ -294,7 +351,7 @@ function handleFileUpload(filePath) {
     let pingCount = 0;
     servers.forEach(async (value, key) => {
       try {
-        if (key !== leaderId) {
+        if (key !== leaderId && key !== learnerId) {
           let response = await axios.post(value + '/ping', { nodeId });
           if (response.data.serverStatus === 'ok') {
             activeNodeList.push(value);
@@ -352,11 +409,31 @@ function handleFileUpload(filePath) {
             path.resolve('uploads', chunkNames[secondChunkIndex])
           );
         });
+
+        axios
+          .post(servers.get(learnerId) + '/chunk/metadata', {
+            chunkMap: convertMapToObject(chunksAvailableNodeMap),
+            nodeId
+          })
+          .then((response) => {
+            if (response.data.fileList && response.data.fileList.length > 0) {
+              fileList = response.data.fileList;
+              io.emit('fileUpdated', JSON.stringify(fileList));
+            }
+          });
       })
       .catch((err) => {
         console.log(err);
       });
   });
+}
+
+function convertMapToObject(map) {
+  const obj = {};
+  map.forEach((value, key) => {
+    obj[key] = value;
+  });
+  return obj;
 }
 
 function updateNodeChuckMap(obj) {
@@ -373,7 +450,7 @@ function updateNodeChuckMap(obj) {
 }
 
 function getNodeLogFile() {
-  return `node-${nodeId}.log`;
+  return nodeId == learnerId ? `learner.log` : `node-${nodeId}.log`;
 }
 
 function updateChuckMapFromNodeLogFile() {
@@ -381,6 +458,10 @@ function updateChuckMapFromNodeLogFile() {
     const logFileName = getNodeLogFile();
     const dataMap = fileServiceInstance.readFile(logFileName);
     chunksAvailableNodeMap = dataMap;
+
+    if (nodeId == learnerId) {
+      updateFileList();
+    }
   }
 }
 
@@ -412,6 +493,14 @@ function sendFileToNode(nodeAddress, chunkPath) {
     console.log(error);
   }
 }
+
+io.on('connection', (socket) => {
+  socket.on('download', (fileName) => {
+    customLoggingMessage(
+      `${new Date().toLocaleString()} - Requesting file ${fileName} from learner node ${learnerId}`
+    );
+  });
+});
 
 server.listen(addresses[baseIndexServer].port, addresses[baseIndexServer].host);
 console.log(

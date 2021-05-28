@@ -121,7 +121,7 @@ app.post('/election', (req, res) => {
 
 app.post('/putCoordinator', (req, res) => {
   handleRequest(req);
-  startElection();
+  handleLeaderElection();
   customLoggingMessage(
     `${new Date().toLocaleString()} - server ${
       req.body.nodeId
@@ -135,14 +135,13 @@ app.post('/newLeader', async (req, res) => {
   leaderId = req.body.idLeader;
   res.status(200).send('ok');
   io.emit('newLeader', leaderId);
-  await leaderAvailable();
+  await checkLeaderAvailability();
 });
 
 app.post('/newLearner', async (req, res) => {
   handleRequest(req);
   learnerId = req.body.idLearner;
   if (learnerId == nodeId) {
-    // update file list with learnerDoc
     updateChuckMapFromNodeLogFile();
   }
   res.status(200).send('ok');
@@ -193,7 +192,16 @@ app.post(
   }
 );
 
-const leaderAvailable = async (_) => {
+app.post('/chunk/validate', (req, res) => {
+  if (nodeId != learnerId) {
+    res.status(404);
+  }
+  utils.handleRequest(req);
+  chunkValidationByLearner(req.body.nodeId, req.body.fileName, req.body.chunks);
+  res.status(200).send();
+});
+
+const checkLeaderAvailability = async (_) => {
   if (!isUP) {
     check = 'off';
   }
@@ -209,7 +217,7 @@ const leaderAvailable = async (_) => {
             response.data.serverStatus
           }`
         );
-        setTimeout(leaderAvailable, 12000);
+        setTimeout(checkLeaderAvailability, 12000);
       } else {
         customLoggingMessage(
           `${new Date().toLocaleString()} - Server leader  ${leaderId} down: ${
@@ -249,11 +257,11 @@ const findCoordinator = (_) => {
   });
 
   if (isUP) {
-    startElection();
+    handleLeaderElection();
   }
 };
 
-const startElection = (_) => {
+const handleLeaderElection = (_) => {
   let someoneAnswer = false;
   isCoordinator = true;
   customLoggingMessage(
@@ -327,10 +335,10 @@ async function selectLearnerNode(id = 0) {
         }
         return;
       } else {
-        servers.forEach(
-          async (value) =>
-            await axios.post(value + '/newLearner', { idLearner: id })
-        );
+        servers.forEach(async (value) => {
+          if (leaderId !== id)
+            await axios.post(value + '/newLearner', { idLearner: id });
+        });
 
         io.emit('newLearner', id);
         return;
@@ -400,11 +408,11 @@ function handleFileUpload(filePath) {
             }
           ]);
 
-          sendFileToNode(
+          sendFileChunkToNode(
             node,
             path.resolve('uploads', chunkNames[firstChunkIndex])
           );
-          sendFileToNode(
+          sendFileChunkToNode(
             node,
             path.resolve('uploads', chunkNames[secondChunkIndex])
           );
@@ -477,7 +485,7 @@ function updateFileList() {
   }
 }
 
-function sendFileToNode(nodeAddress, chunkPath) {
+function sendFileChunkToNode(nodeAddress, chunkPath) {
   const form = new FormData();
   form.append('chunk', fs.createReadStream(chunkPath));
 
@@ -507,6 +515,6 @@ console.log(
   `App listening on http://${addresses[baseIndexServer].host}:${addresses[baseIndexServer].port}`
 );
 
-setTimeout(leaderAvailable, 3000);
+setTimeout(checkLeaderAvailability, 3000);
 
 updateChuckMapFromNodeLogFile();

@@ -1,5 +1,5 @@
 # FileShard
-FileShard is a system to manage files in a distributed manner.
+FileShard is a system to manage files in a distributed manner using Bully Algorithm.
 
 ## Startup
 
